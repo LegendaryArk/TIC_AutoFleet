@@ -277,7 +277,7 @@ def plan_grid_path(
 
     while queue:
         row, col = queue.popleft()
-        for d_row, d_col in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        for d_row, d_col in ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (-1, -1), (1, -1), (-1, 1)):
             next_cell = (row + d_row, col + d_col)
             next_row, next_col = next_cell
             if not (0 <= next_row < GRID_DIM_CELLS and 0 <= next_col < GRID_DIM_CELLS):
