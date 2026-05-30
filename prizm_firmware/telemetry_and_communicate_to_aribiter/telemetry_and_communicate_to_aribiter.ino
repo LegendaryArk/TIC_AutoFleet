@@ -82,6 +82,13 @@ const unsigned long SENSOR_READ_PERIOD_MS = 500;
 int cached_left_ultrasonic_cm = -1;
 int cached_front_ultrasonic_cm = -1;
 
+// Motor encoder velocity tracking
+long lastVelLeftDeg = 0;
+long lastVelRightDeg = 0;
+unsigned long lastVelTimeMs = 0;
+int cached_left_motor_vel_deg_per_sec = 0;
+int cached_right_motor_vel_deg_per_sec = 0;
+
 // ==============================
 // Helpers
 // ==============================
@@ -239,6 +246,12 @@ void printPoseJSON()
   Serial.print(F(",\"left_ultrasonic_cm\":"));
   Serial.print(cached_left_ultrasonic_cm);
 
+  Serial.print(F(",\"left_motor_vel_deg_per_sec\":"));
+  Serial.print(cached_left_motor_vel_deg_per_sec);
+
+  Serial.print(F(",\"right_motor_vel_deg_per_sec\":"));
+  Serial.print(cached_right_motor_vel_deg_per_sec);
+
   Serial.println(F("}"));
 }
 
@@ -247,6 +260,18 @@ void maybeSendTelemetry()
   unsigned long now = millis();
   if (now - lastTelemetrySendMs >= TELEMETRY_PERIOD_MS)
   {
+    long curLeftDeg = prizm.readEncoderDegrees(2);
+    long curRightDeg = prizm.readEncoderDegrees(1);
+    unsigned long dt_ms = now - lastVelTimeMs;
+    if (dt_ms > 0)
+    {
+      cached_left_motor_vel_deg_per_sec = (int)(((curLeftDeg - lastVelLeftDeg) * 1000L) / (long)dt_ms);
+      cached_right_motor_vel_deg_per_sec = (int)(((curRightDeg - lastVelRightDeg) * 1000L) / (long)dt_ms);
+    }
+    lastVelLeftDeg = curLeftDeg;
+    lastVelRightDeg = curRightDeg;
+    lastVelTimeMs = now;
+
     printPoseJSON();
     lastTelemetrySendMs = now;
   }

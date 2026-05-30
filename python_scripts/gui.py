@@ -73,6 +73,8 @@ class TelemetryGUI:
             "theta": [],
             "front_ultra": [],
             "left_ultra": [],
+            "left_motor_vel": [],
+            "right_motor_vel": [],
             "front_echo_t": [],
             "front_echo_x": [],
             "front_echo_y": [],
@@ -335,6 +337,8 @@ class TelemetryGUI:
             theta = telemetry.get("theta_deg")
             front = telemetry.get("front_ultrasonic_cm")
             left = telemetry.get("left_ultrasonic_cm")
+            left_vel = telemetry.get("left_motor_vel_deg_per_sec")
+            right_vel = telemetry.get("right_motor_vel_deg_per_sec")
             t_s = float(t) / 1000.0 if t is not None else None
 
             if t is not None:
@@ -349,6 +353,10 @@ class TelemetryGUI:
                 hist["front_ultra"].append(float(front))
             if left is not None:
                 hist["left_ultra"].append(float(left))
+            if left_vel is not None:
+                hist["left_motor_vel"].append(float(left_vel))
+            if right_vel is not None:
+                hist["right_motor_vel"].append(float(right_vel))
 
             if x is not None and y is not None and theta is not None:
                 x = float(x)
@@ -830,7 +838,13 @@ class TelemetryGUI:
         y = float(selected_state.get("y_cm", 0.0))
         theta = float(selected_state.get("theta_deg", 0.0))
 
+        left_vel = selected_state.get("left_motor_vel_deg_per_sec")
+        right_vel = selected_state.get("right_motor_vel_deg_per_sec")
+        vel_str = ""
+        if left_vel is not None and right_vel is not None:
+            vel_str = f", vel=L:{int(left_vel)} R:{int(right_vel)} deg/s"
+
         self.selected_robot_summary_var.set(
             f"{robot_id}: state={state}, path={path_id}, waypoint={waypoint_index}, "
-            f"pose=({x:.1f}, {y:.1f}, {theta:.1f} deg)"
+            f"pose=({x:.1f}, {y:.1f}, {theta:.1f} deg){vel_str}"
         )

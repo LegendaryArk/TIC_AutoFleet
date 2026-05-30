@@ -59,6 +59,8 @@ class TelemetryMessage(Message):
     theta_deg: float
     front_ultrasonic_cm: Optional[float] = None
     left_ultrasonic_cm: Optional[float] = None
+    left_motor_vel_deg_per_sec: Optional[int] = None
+    right_motor_vel_deg_per_sec: Optional[int] = None
 
     def __init__(
         self,
@@ -72,6 +74,8 @@ class TelemetryMessage(Message):
         theta_deg: float,
         front_ultrasonic_cm: Optional[float] = None,
         left_ultrasonic_cm: Optional[float] = None,
+        left_motor_vel_deg_per_sec: Optional[int] = None,
+        right_motor_vel_deg_per_sec: Optional[int] = None,
     ):
         super().__init__("telemetry")
         self.robot_id = robot_id
@@ -84,6 +88,8 @@ class TelemetryMessage(Message):
         self.theta_deg = theta_deg
         self.front_ultrasonic_cm = front_ultrasonic_cm
         self.left_ultrasonic_cm = left_ultrasonic_cm
+        self.left_motor_vel_deg_per_sec = left_motor_vel_deg_per_sec
+        self.right_motor_vel_deg_per_sec = right_motor_vel_deg_per_sec
 
 
 @dataclass
