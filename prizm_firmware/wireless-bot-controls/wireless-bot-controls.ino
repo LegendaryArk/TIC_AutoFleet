@@ -828,6 +828,30 @@ void handleToggleGripper(const char *json)
     performToggleGripper();
 }
 
+void handleDrivePower(const char *json)
+{
+    if (!jsonTargetsThisRobot(json))
+        return;
+
+    if (path_loaded || active_primitive != PRIM_NONE)
+    {
+        interruptActivePrimitive();
+        clearCurrentPath();
+    }
+
+    int leftPow = 0, rightPow = 0;
+    extractIntField(json, "left", leftPow);
+    extractIntField(json, "right", rightPow);
+    leftPow = constrain(leftPow, -100, 100);
+    rightPow = constrain(rightPow, -100, 100);
+
+    prizm.setMotorPower(1, rightPow);
+    prizm.setMotorPower(2, -leftPow);
+
+    setRobotState("vision_servo");
+    sendAck("drive_power");
+}
+
 void handleControlOpcode(char opcode)
 {
     if (opcode == 'P')
@@ -868,6 +892,10 @@ void handleIncomingJson(const char *json)
     else if (jsonHasType(json, "toggle_gripper"))
     {
         handleToggleGripper(json);
+    }
+    else if (jsonHasType(json, "drive_power"))
+    {
+        handleDrivePower(json);
     }
 }
 

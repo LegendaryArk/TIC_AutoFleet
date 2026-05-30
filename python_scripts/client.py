@@ -69,6 +69,7 @@ FORWARD_TO_ROBOT_TYPES = {
     "resume",
     "stop",
     "toggle_gripper",
+    "drive_power",
 }
 
 serial_write_lock = threading.Lock()

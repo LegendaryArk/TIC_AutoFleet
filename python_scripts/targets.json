@@ -1,0 +1,6 @@
+{
+  "targets": [
+    {"x_cm": 150, "y_cm": 200, "label": "object_1"},
+    {"x_cm": 300, "y_cm": 100, "label": "object_2"}
+  ]
+}
