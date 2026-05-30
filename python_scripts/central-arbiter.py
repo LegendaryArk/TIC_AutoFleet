@@ -293,7 +293,7 @@ def plan_grid_path(
             return path
 
         row, col = current
-        for d_row, d_col in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        for d_row, d_col in ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (-1, 1), (1, -1), (-1, -1)):
             neighbor = (row + d_row, col + d_col)
             nr, nc = neighbor
             if not (0 <= nr < GRID_DIM_CELLS and 0 <= nc < GRID_DIM_CELLS):
