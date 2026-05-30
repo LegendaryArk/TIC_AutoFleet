@@ -25,6 +25,8 @@ int current_waypoint_index = -1;
 const float WHEEL_DIAMETER_CM = 10.16; // 4 inches
 const float WHEEL_BASE_CM = 26.035;    // 10.25 inches
 const float WHEEL_CIRCUMFERENCE_CM = PI * WHEEL_DIAMETER_CM;
+const float WHEEL_DIAMETER_M = 0.1026f;
+const float DEG_PER_SEC_TO_M_PER_SEC = (PI * WHEEL_DIAMETER_M) / 360.0f; // ~0.000896
 const int GRIPPER_SERVO_ID = 1;
 const int GRIPPER_OPEN_DEG = 100;
 const int GRIPPER_CLOSED_DEG = 35;
@@ -69,6 +71,19 @@ const float HEADING_TOLERANCE_DEG = 4.0;
 
 int turn_speed_deg_per_sec = 150;
 int drive_speed_deg_per_sec = 200;
+
+struct PIDGains {
+    float kp, ki, kd, kf;
+};
+PIDGains leftPid  = {1.0f, 0.0f, 0.0007f, 1.11f};
+PIDGains rightPid = {0.0f, 0.0f, 0.0f, 1.0f};
+
+// Velocity low-pass filter alpha: 0=frozen, 1=no filter (raw)
+// At ~5ms loop: alpha=0.3 → time constant ~11ms, good noise suppression
+const float VEL_ALPHA = 0.3f;
+
+float leftVel  = 0.0f;  // m/s setpoint (~200 deg/s operational speed)
+float rightVel = 0.0f;
 
 // ==============================
 // Serial receive buffer
@@ -302,6 +317,90 @@ void maybeSendTelemetry()
 // ==============================
 // Low-level motion primitives
 // ==============================
+void updateMotorPower() {
+    static unsigned long prev_time = millis();
+    static long pidPrevLeftDeg  = 0;   // separate from odometry prevLeftDeg/prevRightDeg
+    static long pidPrevRightDeg = 0;
+
+    static float integralLeft = 0;
+    static float integralRight = 0;
+
+    static float prevErrLeft = 0;
+    static float prevErrRight = 0;
+
+    static float filtVelLeft  = 0;
+    static float filtVelRight = 0;
+
+    unsigned long now = millis();
+    float dt = (now - prev_time) / 1000.0f;
+    if (dt < 0.001f) dt = 0.001f;   // guard against same-ms calls
+
+    // motor 2 = left wheel, motor 1 = right wheel (matches updateOdometry)
+    long leftDeg  = prizm.readEncoderDegrees(2);
+    long rightDeg = prizm.readEncoderDegrees(1);
+
+    // convert encoder deg/s → m/s (raw)
+    float rawVelLeft  = (leftDeg  - pidPrevLeftDeg)  / dt * DEG_PER_SEC_TO_M_PER_SEC;
+    float rawVelRight = (rightDeg - pidPrevRightDeg) / dt * DEG_PER_SEC_TO_M_PER_SEC;
+
+    pidPrevLeftDeg  = leftDeg;
+    pidPrevRightDeg = rightDeg;
+    prev_time = now;
+
+    // left motor: flip sign to match odometry convention (dL = -dL)
+    rawVelLeft = -rawVelLeft;
+
+    // low-pass filter — error and derivative both computed on filtered signal
+    filtVelLeft  = VEL_ALPHA * rawVelLeft  + (1.0f - VEL_ALPHA) * filtVelLeft;
+    filtVelRight = VEL_ALPHA * rawVelRight + (1.0f - VEL_ALPHA) * filtVelRight;
+
+    float errLeft  = leftVel  - filtVelLeft;
+    float errRight = rightVel - filtVelRight;
+
+    integralLeft  += errLeft  * dt;
+    integralRight += errRight * dt;
+    // clamp integral contribution to ±0.3 of output range (anti-windup)
+    const float INTEGRAL_CLAMP = 0.3f;
+    if (leftPid.ki  > 0) integralLeft  = constrain(integralLeft,  -INTEGRAL_CLAMP / leftPid.ki,  INTEGRAL_CLAMP / leftPid.ki);
+    if (rightPid.ki > 0) integralRight = constrain(integralRight, -INTEGRAL_CLAMP / rightPid.ki, INTEGRAL_CLAMP / rightPid.ki);
+
+    float dLeft  = (errLeft  - prevErrLeft)  / dt;
+    float dRight = (errRight - prevErrRight) / dt;
+
+    float controlLeft  = (leftPid.kf  * leftVel)  + (leftPid.kp  * errLeft)  + (leftPid.ki  * integralLeft)  + (leftPid.kd  * dLeft);
+    float controlRight = (rightPid.kf * rightVel) + (rightPid.kp * errRight) + (rightPid.ki * integralRight) + (rightPid.kd * dRight);
+
+    // clamp to PRIZM setMotorPower range [-100, 100]
+    controlLeft  = constrain(controlLeft,  -1.0f, 1.0f);
+    controlRight = constrain(controlRight, -1.0f, 1.0f);
+
+    // setpoint | raw_vel | filt_vel | control | err | integral | derivative
+    Serial.print(leftVel, 3);
+    Serial.print(F(", "));
+    Serial.print(rawVelLeft, 3);
+    Serial.print(F(", "));
+    Serial.print(filtVelLeft, 3);
+    Serial.print(F(", "));
+    Serial.print(controlLeft, 3);
+    Serial.print(F(", "));
+    Serial.print(errLeft, 3);
+    Serial.print(F(", "));
+    Serial.print(integralLeft, 3);
+    Serial.print(F(", "));
+    Serial.println(dLeft, 3);
+
+    prizm.setMotorPower(2, (int)(-100.0f * controlLeft));   // flip: positive cmd = forward on left
+    prizm.setMotorPower(1, (int)( 100.0f * controlRight));
+
+    prevErrLeft  = errLeft;
+    prevErrRight = errRight;
+}
+
+void setMotorVel(float left, float right) {
+    leftVel = left;
+    rightVel = right;
+}
+
 void stopMotorsNow()
 {
     // Explicitly zero any in-flight motor-degree command before cutting power.
@@ -933,7 +1032,7 @@ void setup()
     pinMode(txPin, OUTPUT);
 
     prizm.PrizmBegin();
-    Serial.begin(115200);  // USB SERIAL
+    Serial.begin(9600);  // USB SERIAL 115200
     espSerial.begin(38400); // ESP COMMUNICATION SERIAL (ESP NEEDS TO LOOK AT THE SAME BAUDRATE)
     prizm.setServoSpeed(GRIPPER_SERVO_ID, GRIPPER_SERVO_SPEED_PERCENT);
     prizm.setServoPosition(GRIPPER_SERVO_ID, GRIPPER_OPEN_DEG);
@@ -943,25 +1042,29 @@ void setup()
     setRobotState("ready");
     maybeUpdateSensors();
     printPoseJSON();
+
+    setMotorVel(0.3f, 0);
 }
 
 void loop()
 {
     // 1. Read commands from Serial (USB or Wifi)
-    readSerialCommands();
-    readSerialCommands();
+    // readSerialCommands();
+    // readSerialCommands();
 
     // 2. Update ongoing motion / odometry
-    updateActivePrimitive();
-    readSerialCommands();
+    // updateActivePrimitive();
+    // readSerialCommands();
 
-    // 3. Start next primitive if needed
-    maybeStartNextPrimitive();
-    readSerialCommands();
+    // // 3. Start next primitive if needed
+    // maybeStartNextPrimitive();
+    // readSerialCommands();
+
+    updateMotorPower();
 
     // 4. Refresh sensors only when the serial input is quiet
-    maybeUpdateSensors();
+    // maybeUpdateSensors();
 
     // 5. Periodic telemetry
-    maybeSendTelemetry();
+    // maybeSendTelemetry();
 }
