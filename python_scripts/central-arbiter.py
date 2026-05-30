@@ -275,7 +275,9 @@ def plan_grid_path(
         return [start]
 
     def h(cell):
-        return abs(cell[0] - goal[0]) + abs(cell[1] - goal[1])
+        dr = abs(cell[0] - goal[0])
+        dc = abs(cell[1] - goal[1])
+        return max(dr, dc)  # Chebyshev — admissible for 8-directional movement
 
     open_set = [(h(start), 0, start)]
     came_from: dict = {start: None}
