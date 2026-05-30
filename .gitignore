@@ -2,4 +2,13 @@
 .vscode/*
 
 python_scripts/.venv/*
+<<<<<<< HEAD
 python_scripts/.idea/*
+=======
+
+# WiFi credentials
+esp32_firmware/env.h
+esp32_firmware/include/env.h
+
+.pio/*
+>>>>>>> ff3a766 (feat: gitignore for esp32)
