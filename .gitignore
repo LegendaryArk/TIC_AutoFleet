@@ -2,7 +2,6 @@
 .vscode/*
 
 python_scripts/.venv/*
-<<<<<<< HEAD
 python_scripts/.idea/*
 python_scripts/__pycache__/*
 
