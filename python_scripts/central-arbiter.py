@@ -1,5 +1,7 @@
+import heapq
 import json
-from collections import deque
+import math
+from collections import defaultdict
 import socket
 import threading
 import time
@@ -272,32 +274,38 @@ def plan_grid_path(
     if start == goal:
         return [start]
 
-    queue = deque([start])
-    came_from = {start: None}
+    def h(cell):
+        return abs(cell[0] - goal[0]) + abs(cell[1] - goal[1])
 
-    while queue:
-        row, col = queue.popleft()
+    open_set = [(h(start), 0, start)]
+    came_from: dict = {start: None}
+    g_score: dict = {start: 0}
+    tie = 0
+
+    while open_set:
+        _, _, current = heapq.heappop(open_set)
+        if current == goal:
+            path = []
+            while current is not None:
+                path.append(current)
+                current = came_from[current]
+            path.reverse()
+            return path
+
+        row, col = current
         for d_row, d_col in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-            next_cell = (row + d_row, col + d_col)
-            next_row, next_col = next_cell
-            if not (0 <= next_row < GRID_DIM_CELLS and 0 <= next_col < GRID_DIM_CELLS):
+            neighbor = (row + d_row, col + d_col)
+            nr, nc = neighbor
+            if not (0 <= nr < GRID_DIM_CELLS and 0 <= nc < GRID_DIM_CELLS):
                 continue
-            if next_cell in blocked and next_cell != goal:
+            if neighbor in blocked and neighbor != goal:
                 continue
-            if next_cell in came_from:
-                continue
-
-            came_from[next_cell] = (row, col)
-            if next_cell == goal:
-                path = [goal]
-                current = (row, col)
-                while current is not None:
-                    path.append(current)
-                    current = came_from[current]
-                path.reverse()
-                return path
-
-            queue.append(next_cell)
+            new_g = g_score[current] + 1
+            if new_g < g_score.get(neighbor, float('inf')):
+                came_from[neighbor] = current
+                g_score[neighbor] = new_g
+                tie += 1
+                heapq.heappush(open_set, (new_g + h(neighbor), tie, neighbor))
 
     return None
 
