@@ -76,7 +76,7 @@ struct PIDGains {
     float kp, ki, kd, kf;
 };
 PIDGains leftPid  = {1.0f, 0.0f, 0.0007f, 1.11f};
-PIDGains rightPid = {0.0f, 0.0f, 0.0f, 1.0f};
+PIDGains rightPid = {1.0f, 0.0f, 0.0007f, 1.68f};
 
 // Velocity low-pass filter alpha: 0=frozen, 1=no filter (raw)
 // At ~5ms loop: alpha=0.3 → time constant ~11ms, good noise suppression
@@ -373,21 +373,6 @@ void updateMotorPower() {
     // clamp to PRIZM setMotorPower range [-100, 100]
     controlLeft  = constrain(controlLeft,  -1.0f, 1.0f);
     controlRight = constrain(controlRight, -1.0f, 1.0f);
-
-    // setpoint | raw_vel | filt_vel | control | err | integral | derivative
-    Serial.print(leftVel, 3);
-    Serial.print(F(", "));
-    Serial.print(rawVelLeft, 3);
-    Serial.print(F(", "));
-    Serial.print(filtVelLeft, 3);
-    Serial.print(F(", "));
-    Serial.print(controlLeft, 3);
-    Serial.print(F(", "));
-    Serial.print(errLeft, 3);
-    Serial.print(F(", "));
-    Serial.print(integralLeft, 3);
-    Serial.print(F(", "));
-    Serial.println(dLeft, 3);
 
     prizm.setMotorPower(2, (int)(-100.0f * controlLeft));   // flip: positive cmd = forward on left
     prizm.setMotorPower(1, (int)( 100.0f * controlRight));
@@ -1042,29 +1027,27 @@ void setup()
     setRobotState("ready");
     maybeUpdateSensors();
     printPoseJSON();
-
-    setMotorVel(0.3f, 0);
 }
 
 void loop()
 {
     // 1. Read commands from Serial (USB or Wifi)
-    // readSerialCommands();
-    // readSerialCommands();
+    readSerialCommands();
+    readSerialCommands();
 
     // 2. Update ongoing motion / odometry
-    // updateActivePrimitive();
-    // readSerialCommands();
+    updateActivePrimitive();
+    readSerialCommands();
 
-    // // 3. Start next primitive if needed
-    // maybeStartNextPrimitive();
-    // readSerialCommands();
+    // 3. Start next primitive if needed
+    maybeStartNextPrimitive();
+    readSerialCommands();
 
     updateMotorPower();
 
     // 4. Refresh sensors only when the serial input is quiet
-    // maybeUpdateSensors();
+    maybeUpdateSensors();
 
     // 5. Periodic telemetry
-    // maybeSendTelemetry();
+    maybeSendTelemetry();
 }
