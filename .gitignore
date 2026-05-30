@@ -2,5 +2,12 @@
 .vscode/*
 
 python_scripts/.venv/*
+<<<<<<< HEAD
 python_scripts/.idea/*
 python_scripts/__pycache__/*
+
+# WiFi credentials
+esp32_firmware/env.h
+esp32_firmware/include/env.h
+
+.pio/*
