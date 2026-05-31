@@ -24,6 +24,7 @@ PORT = 9000
 MAX_CLIENTS = 10
 GRID_CELL_CM = 10.0
 GRID_DIM_CELLS = 40
+ROBOT_CLEARANCE_CELLS = 2  # min Chebyshev separation enforced by space-time planner
 
 
 @dataclass
@@ -255,6 +256,10 @@ def clamp_cell(value: int) -> int:
     return max(0, min(GRID_DIM_CELLS - 1, value))
 
 
+def chebyshev(a: tuple[int, int], b: tuple[int, int]) -> int:
+    return max(abs(a[0] - b[0]), abs(a[1] - b[1]))
+
+
 def pose_to_cell(telemetry: dict) -> tuple[int, int] | None:
     try:
         x_cm = float(telemetry["x_cm"])
@@ -321,6 +326,81 @@ def plan_grid_path(
     return None
 
 
+def plan_grid_path_spacetime(
+    start: tuple[int, int],
+    goal: tuple[int, int],
+    other_path: list[tuple[int, int]],
+    clearance: int,
+    max_t: int = GRID_DIM_CELLS * 4,
+) -> list[tuple[int, int]] | None:
+    """A* in (row, col, timestep) space.
+
+    At each timestep t the forbidden zone is all cells within Chebyshev
+    distance `clearance` of other_path[min(t, last)].  The planned robot may
+    also stay in place (wait) for one step to let the other robot clear a zone.
+    Returns a list of (row, col) cells including start; may contain repeated
+    cells where the robot waits.  Returns None if no path is found within max_t.
+    """
+    if not other_path:
+        return plan_grid_path(start, goal, set())
+
+    if start == goal:
+        return [start]
+
+    last_idx = len(other_path) - 1
+
+    def other_pos(t: int) -> tuple[int, int]:
+        return other_path[min(t, last_idx)]
+
+    def is_blocked(r: int, c: int, t: int) -> bool:
+        return chebyshev((r, c), other_pos(t)) <= clearance
+
+    def h(r: int, c: int) -> int:
+        return max(abs(r - goal[0]), abs(c - goal[1]))
+
+    start_state = (start[0], start[1], 0)
+    open_set = [(h(*start[:2]), 0, start_state)]
+    came_from: dict = {start_state: None}
+    g_score: dict = {start_state: 0}
+    tie = 0
+
+    while open_set:
+        _, _, state = heapq.heappop(open_set)
+        r, c, t = state
+
+        if (r, c) == goal:
+            path = []
+            cur: tuple | None = state
+            while cur is not None:
+                path.append((cur[0], cur[1]))
+                cur = came_from[cur]
+            path.reverse()
+            return path
+
+        if t >= max_t:
+            continue
+
+        for d_row, d_col in (
+            (1, 0), (-1, 0), (0, 1), (0, -1),
+            (1, 1), (-1, 1), (1, -1), (-1, -1),
+            (0, 0),  # wait in place
+        ):
+            nr, nc, nt = r + d_row, c + d_col, t + 1
+            if not (0 <= nr < GRID_DIM_CELLS and 0 <= nc < GRID_DIM_CELLS):
+                continue
+            if is_blocked(nr, nc, nt) and (nr, nc) != goal:
+                continue
+            neighbor = (nr, nc, nt)
+            new_g = g_score[state] + 1
+            if new_g < g_score.get(neighbor, float('inf')):
+                came_from[neighbor] = state
+                g_score[neighbor] = new_g
+                tie += 1
+                heapq.heappush(open_set, (new_g + h(nr, nc), tie, neighbor))
+
+    return None
+
+
 def start_coordinated_traverse(message: dict) -> bool:
     robots = message.get("robots", [])
     if len(robots) != 2:
@@ -358,46 +438,69 @@ def start_coordinated_traverse(message: dict) -> bool:
         clear_robot_sequence(session_one)
         clear_robot_sequence(session_two)
 
-    if start_one == start_two:
-        print("[COORD] Robots are in the same grid cell; refusing to plan until they are separated")
+    if chebyshev(start_one, start_two) <= ROBOT_CLEARANCE_CELLS:
+        print(f"[COORD] Robots start {chebyshev(start_one, start_two)} cell(s) apart; need > {ROBOT_CLEARANCE_CELLS}")
         return False
 
     if goal_one == goal_two:
         print("[COORD] Robots cannot share the same goal cell")
         return False
 
+    if chebyshev(goal_one, goal_two) <= ROBOT_CLEARANCE_CELLS:
+        print(f"[COORD] Goals are {chebyshev(goal_one, goal_two)} cell(s) apart; need > {ROBOT_CLEARANCE_CELLS}")
+        return False
+
+    # Robot 1 plans normally, avoiding robot 2's start position.
     path_one = plan_grid_path(start_one, goal_one, {start_two})
     if path_one is None:
         print(f"[COORD] No path found for {robot_one_id} from {start_one} to {goal_one}")
         return False
 
-    path_two = plan_grid_path(start_two, goal_two, {goal_one})
+    # Robot 2 plans in space-time, maintaining ROBOT_CLEARANCE_CELLS separation
+    # from robot 1's position at every timestep (with waits allowed).
+    path_two = plan_grid_path_spacetime(start_two, goal_two, path_one, ROBOT_CLEARANCE_CELLS)
     if path_two is None:
-        print(f"[COORD] No path found for {robot_two_id} from {start_two} to {goal_two}")
+        print(f"[COORD] No collision-free path found for {robot_two_id} from {start_two} to {goal_two}")
         return False
+
+    waypoints_one = [cell_center_waypoint(c) for c in path_one[1:]]
+    waypoints_two = [cell_center_waypoint(c) for c in path_two[1:]]
+
+    print(f"[COORD] {robot_one_id}: {start_one} -> {goal_one} via {len(path_one) - 1} cells")
+    print(f"[COORD] {robot_two_id}: {start_two} -> {goal_two} via {len(path_two) - 1} cells (may include wait steps)")
 
     with clients_lock:
         session_one = client_sessions[robots_by_id[robot_one_id]]
         session_two = client_sessions[robots_by_id[robot_two_id]]
 
-        session_one.pending_waypoints = [cell_center_waypoint(cell) for cell in path_one[1:]]
-        session_one.pending_motion = None
-        session_one.sequence_path_id = next_subpath_id()
-        session_one.active_subpath_id = None
-        session_one.awaiting_path_ack = False
-        session_one.awaiting_path_complete = False
+        pid_one = next_subpath_id()
+        pid_two = next_subpath_id()
 
-        session_two.pending_waypoints = [cell_center_waypoint(cell) for cell in path_two[1:]]
-        session_two.pending_motion = None
-        session_two.sequence_path_id = next_subpath_id()
-        session_two.active_subpath_id = None
-        session_two.awaiting_path_ack = False
-        session_two.awaiting_path_complete = False
+        for session, pid in ((session_one, pid_one), (session_two, pid_two)):
+            session.pending_waypoints = []
+            session.pending_motion = None
+            session.sequence_path_id = pid
+            session.active_subpath_id = pid
+            session.current_path_id = str(pid)
+            session.current_waypoint_index = 0
+            session.awaiting_path_ack = True
+            session.awaiting_path_complete = True
 
-    print(f"[COORD] {robot_one_id}: {start_one} -> {goal_one} using {len(path_one) - 1} steps")
-    print(f"[COORD] {robot_two_id}: {start_two} -> {goal_two} using {len(path_two) - 1} steps")
-    maybe_dispatch_waiting_sequences()
-    return True
+    ok_one = send_to_robot(robot_one_id, {
+        "type": "path_assignment",
+        "robot_id": robot_one_id,
+        "path_id": pid_one,
+        "replace_existing": True,
+        "waypoints": waypoints_one,
+    })
+    ok_two = send_to_robot(robot_two_id, {
+        "type": "path_assignment",
+        "robot_id": robot_two_id,
+        "path_id": pid_two,
+        "replace_existing": True,
+        "waypoints": waypoints_two,
+    })
+    return ok_one and ok_two
 
 
 def queue_robot_path(message: dict) -> bool:
