@@ -1,12 +1,21 @@
 import json
 from collections import deque
 import socket
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 
-from gui import TelemetryGUI
+_HEADLESS = "--no-gui" in sys.argv
+
+if _HEADLESS:
+    class TelemetryGUI:
+        def __init__(self, **kw): pass
+        def update_robot(self, *a, **kw): pass
+        def run(self): threading.Event().wait()
+else:
+    from gui import TelemetryGUI
 
 HOST = "0.0.0.0"
 PORT = 9000
