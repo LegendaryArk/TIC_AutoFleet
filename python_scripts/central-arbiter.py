@@ -186,11 +186,70 @@ def maybe_dispatch_waiting_sequences() -> bool:
 
     dispatched = False
     for robot_id in robot_ids:
-        if dispatch_next_waypoint(robot_id):
+        if dispatch_full_path(robot_id):
             dispatched = True
             break
 
     return dispatched
+
+
+def dispatch_full_path(robot_id: str) -> bool:
+    with clients_lock:
+        client_id = robots_by_id.get(robot_id)
+        if client_id is None:
+            print(f"[SEQUENCE] No connected session for robot_id={robot_id}")
+            return False
+
+        session = client_sessions.get(client_id)
+        if session is None:
+            print(f"[SEQUENCE] Session disappeared for robot_id={robot_id}")
+            return False
+
+        if any_other_robot_busy_unlocked(robot_id):
+            return False
+
+        if session.awaiting_path_ack or session.awaiting_path_complete:
+            return False
+
+        if not session.pending_waypoints:
+            session.pending_motion = None
+            session.sequence_path_id = None
+            session.active_subpath_id = None
+            return False
+
+        waypoints = list(session.pending_waypoints)
+        session.pending_waypoints.clear()
+        subpath_id = next_subpath_id()
+        message = {
+            "type": "path_assignment",
+            "robot_id": robot_id,
+            "path_id": subpath_id,
+            "replace_existing": True,
+            "waypoints": waypoints,
+        }
+        if session.pending_motion is not None:
+            message["motion"] = dict(session.pending_motion)
+
+        session.active_subpath_id = subpath_id
+        session.current_path_id = str(subpath_id)
+        session.current_waypoint_index = 0
+        session.awaiting_path_ack = True
+        session.awaiting_path_complete = True
+
+    ok = send_to_robot(robot_id, message)
+    if not ok:
+        with clients_lock:
+            client_id = robots_by_id.get(robot_id)
+            session = client_sessions.get(client_id) if client_id is not None else None
+            if session is not None:
+                session.pending_waypoints = waypoints
+                session.active_subpath_id = None
+                session.awaiting_path_ack = False
+                session.awaiting_path_complete = False
+        return False
+
+    print(f"[SEQUENCE] dispatched full path {subpath_id} to {robot_id} ({len(waypoints)} waypoints)")
+    return True
 
 
 def dispatch_next_waypoint(robot_id: str) -> bool:

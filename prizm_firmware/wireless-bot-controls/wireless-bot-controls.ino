@@ -103,6 +103,13 @@ int cached_left_ultrasonic_cm = -1;
 int cached_front_ultrasonic_cm = -1;
 
 // ==============================
+// Velocity mode (pure pursuit)
+// ==============================
+const unsigned long VELOCITY_TIMEOUT_MS = 500;
+unsigned long velocity_last_received_ms = 0;
+bool velocity_active = false;
+
+// ==============================
 // Helpers
 // ==============================
 float normalizeAngle(float angle)
@@ -686,6 +693,12 @@ void handlePathAssignment(const char *json)
     if (!jsonTargetsThisRobot(json))
         return;
 
+    if (velocity_active)
+    {
+        velocity_active = false;
+        setMotorVel(0.0f, 0.0f);
+    }
+
     int newPathId = -1;
     extractIntField(json, "path_id", newPathId);
 
@@ -790,6 +803,8 @@ void performStop()
 {
     interruptActivePrimitive();
     clearCurrentPath();
+    velocity_active = false;
+    setMotorVel(0.0f, 0.0f);
     path_paused = false;
     setRobotState("idle");
 
@@ -847,6 +862,24 @@ void handleControlOpcode(char opcode)
     }
 }
 
+void handleVelocity(const char *json)
+{
+    if (!jsonTargetsThisRobot(json))
+        return;
+
+    float left_m_s = 0.0f, right_m_s = 0.0f;
+    extractFloatField(json, "left_m_s",  left_m_s);
+    extractFloatField(json, "right_m_s", right_m_s);
+
+    if (!velocity_active)
+    {
+        interruptActivePrimitive();
+    }
+    setMotorVel(left_m_s, right_m_s);
+    velocity_last_received_ms = millis();
+    velocity_active = true;
+}
+
 void handleIncomingJson(const char *json)
 {
     if (jsonHasType(json, "path_assignment"))
@@ -868,6 +901,10 @@ void handleIncomingJson(const char *json)
     else if (jsonHasType(json, "toggle_gripper"))
     {
         handleToggleGripper(json);
+    }
+    else if (jsonHasType(json, "velocity"))
+    {
+        handleVelocity(json);
     }
 }
 
@@ -953,6 +990,8 @@ void updateActivePrimitive()
 
 void maybeStartNextPrimitive()
 {
+    if (velocity_active)
+        return;
     if (!path_loaded)
         return;
     if (path_paused)
@@ -1043,7 +1082,17 @@ void loop()
     maybeStartNextPrimitive();
     readSerialCommands();
 
-    updateMotorPower();
+    if (velocity_active)
+    {
+        updateMotorPower();
+
+        if (millis() - velocity_last_received_ms > VELOCITY_TIMEOUT_MS)
+        {
+            stopMotorsNow();
+            setMotorVel(0.0f, 0.0f);
+            velocity_active = false;
+        }
+    }
 
     // 4. Refresh sensors only when the serial input is quiet
     maybeUpdateSensors();
