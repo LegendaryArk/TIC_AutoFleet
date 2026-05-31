@@ -1,0 +1,569 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Robot Telemetry Dashboard</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: system-ui, sans-serif;
+  font-size: 13px;
+  background: #0f172a;
+  color: #e2e8f0;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 14px;
+  background: #0f172a;
+  border-bottom: 1px solid #1e3a5f;
+  flex-shrink: 0;
+}
+header h1 { font-size: 14px; font-weight: 600; color: #e2e8f0; }
+.badge {
+  font-size: 10px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: #064e3b;
+  color: #6ee7b7;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+}
+#ws-status {
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #374151;
+  color: #9ca3af;
+  margin-left: auto;
+}
+#ws-status.connected { background: #064e3b; color: #6ee7b7; }
+
+.main { display: flex; flex: 1; overflow: hidden; }
+
+/* ───── Left panel ───── */
+.left-panel {
+  width: 290px;
+  flex-shrink: 0;
+  background: #0f172a;
+  border-right: 1px solid #1e3a5f;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.section {
+  border-bottom: 1px solid #1e3a5f;
+  padding: 9px 11px;
+}
+.section h2 {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #475569;
+  margin-bottom: 7px;
+}
+
+/* ───── Robot table ───── */
+#robot-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+#robot-table th {
+  text-align: left;
+  color: #475569;
+  font-weight: 600;
+  padding: 2px 3px;
+  border-bottom: 1px solid #1e293b;
+}
+#robot-table td { padding: 3px 3px; font-variant-numeric: tabular-nums; }
+#robot-table tr:nth-child(even) td { background: #111827; }
+
+/* ───── Telemetry detail cards ───── */
+.robot-card {
+  background: #111827;
+  border: 1px solid #1e3a5f;
+  border-radius: 5px;
+  padding: 7px 9px;
+  margin-bottom: 6px;
+}
+.robot-card .card-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.robot-card .robot-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.robot-card .card-title { font-weight: 700; font-size: 12px; }
+.robot-card .state-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: #1e3a5f;
+  color: #93c5fd;
+  margin-left: auto;
+}
+.robot-card .gripper-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-weight: 600;
+}
+.robot-card .gripper-open  { background: #064e3b; color: #6ee7b7; }
+.robot-card .gripper-closed { background: #3b0764; color: #d8b4fe; }
+
+.vel-row { display: flex; align-items: center; gap: 5px; margin-top: 4px; }
+.vel-label { font-size: 10px; color: #64748b; width: 14px; }
+.vel-bar-track {
+  flex: 1; height: 6px;
+  background: #1e293b;
+  border-radius: 3px;
+  overflow: hidden;
+}
+.vel-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.15s;
+}
+.vel-bar-fill.left  { background: #3b82f6; }
+.vel-bar-fill.right { background: #10b981; }
+.vel-value { font-size: 10px; color: #94a3b8; width: 44px; text-align: right; font-variant-numeric: tabular-nums; }
+
+.pose-row { font-size: 10px; color: #64748b; margin-top: 4px; }
+
+/* ───── Form controls ───── */
+select, input[type="number"], input[type="text"] {
+  width: 100%;
+  background: #0a0f1e;
+  border: 1px solid #1e3a5f;
+  color: #e2e8f0;
+  padding: 4px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  margin-bottom: 4px;
+}
+select:focus, input:focus { outline: 1px solid #3b82f6; }
+
+.btn-row { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 4px; }
+button {
+  flex: 1 1 auto;
+  min-width: 50px;
+  padding: 5px 6px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  background: #1e3a5f;
+  color: #93c5fd;
+  transition: background 0.15s;
+}
+button:hover { background: #2563eb; color: #fff; }
+button.danger  { background: #7f1d1d; color: #fca5a5; }
+button.danger:hover  { background: #dc2626; color: #fff; }
+button.success { background: #064e3b; color: #6ee7b7; }
+button.success:hover { background: #059669; color: #fff; }
+button.warn    { background: #78350f; color: #fcd34d; }
+button.warn:hover    { background: #d97706; color: #fff; }
+button.primary { background: #1d4ed8; color: #bfdbfe; }
+button.primary:hover { background: #2563eb; color: #fff; }
+
+.row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-top: 4px; }
+.row2 label { font-size: 10px; color: #64748b; margin-bottom: 2px; display: block; }
+
+/* ───── AprilTag table ───── */
+#tag-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+  margin-bottom: 6px;
+}
+#tag-table th { color: #475569; font-weight: 600; padding: 2px 3px; border-bottom: 1px solid #1e293b; text-align: left; }
+#tag-table td { padding: 3px 3px; }
+
+.tag-add-row { display: flex; gap: 4px; align-items: flex-end; margin-top: 4px; }
+.tag-add-row input { margin-bottom: 0; }
+
+/* ───── Status bar ───── */
+#status-bar {
+  font-size: 11px;
+  color: #64748b;
+  padding: 5px 12px;
+  background: #0a0f1e;
+  border-top: 1px solid #1e293b;
+  flex-shrink: 0;
+  min-height: 26px;
+  word-break: break-all;
+}
+
+/* ───── Right area ───── */
+.right-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: #0a0f1e;
+}
+.arena-wrap {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px;
+  overflow: hidden;
+}
+#arena-canvas {
+  cursor: crosshair;
+  border: 1px solid #1e3a5f;
+  border-radius: 4px;
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+}
+.camera-strip {
+  height: 180px;
+  background: #060b15;
+  border-top: 1px solid #1e3a5f;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  position: relative;
+}
+.camera-strip img { height: 100%; object-fit: contain; }
+.cam-label {
+  position: absolute; top: 5px; left: 9px;
+  font-size: 9px; color: #334155;
+  text-transform: uppercase; letter-spacing: 0.06em;
+}
+.cam-offline { color: #334155; font-size: 11px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Robot Telemetry Dashboard</h1>
+  <span class="badge">A* + Pure Pursuit</span>
+  <span id="ws-status">Connecting…</span>
+</header>
+
+<div class="main">
+  <!-- ───── Left panel ───── -->
+  <div class="left-panel">
+
+    <!-- Robot summary table -->
+    <div class="section">
+      <h2>Fleet Status</h2>
+      <table id="robot-table">
+        <thead><tr>
+          <th>ID</th><th>State</th><th>x</th><th>y</th><th>θ</th><th>Grip</th>
+        </tr></thead>
+        <tbody id="robot-tbody"></tbody>
+      </table>
+    </div>
+
+    <!-- Telemetry detail cards (one per robot) -->
+    <div class="section" id="telemetry-cards-section">
+      <h2>Telemetry Detail</h2>
+      <div id="telemetry-cards"></div>
+    </div>
+
+    <!-- Robot controls -->
+    <div class="section">
+      <h2>Robot Control</h2>
+      <select id="robot-select"><option value="">— no robots —</option></select>
+      <div class="btn-row">
+        <button id="btn-pause" class="warn">Pause</button>
+        <button id="btn-resume" class="success">Resume</button>
+        <button id="btn-stop" class="danger">Stop</button>
+        <button id="btn-gripper">Gripper ⇌</button>
+      </div>
+    </div>
+
+    <!-- A* navigate to goal -->
+    <div class="section">
+      <h2>Navigate (A* + Pure Pursuit)</h2>
+      <p style="font-size:10px;color:#475569;margin-bottom:5px">
+        Click the arena or enter coordinates. The server plans an A* path and sends all waypoints at once.
+      </p>
+      <div class="row2">
+        <div><label>x (cm)</label><input type="number" id="wp-x" step="0.1" min="0" max="400" placeholder="200"></div>
+        <div><label>y (cm)</label><input type="number" id="wp-y" step="0.1" min="0" max="400" placeholder="200"></div>
+      </div>
+      <button id="btn-go-waypoint" class="primary" style="width:100%;margin-top:4px">Navigate →</button>
+    </div>
+
+    <!-- Debug test paths (geometric, bypass A*) -->
+    <div class="section">
+      <h2>Debug Paths <span style="font-size:9px;color:#475569">(bypass A*)</span></h2>
+      <div class="btn-row">
+        <button id="btn-straight">Straight</button>
+        <button id="btn-turnaround">180°</button>
+        <button id="btn-lpath">L-Path</button>
+      </div>
+    </div>
+
+    <!-- Two-robot coordinated traverse -->
+    <div class="section">
+      <h2>Coordinated Traverse</h2>
+      <p style="font-size:10px;color:#475569;margin-bottom:5px">
+        40×40 grid · 10 cm cells · indices 0–39
+      </p>
+      <label style="font-size:10px;color:#64748b">Robot 1</label>
+      <select id="robot-one-sel"><option value="">—</option></select>
+      <div class="row2">
+        <div><label>Row</label><input type="number" id="goal-one-row" value="10" min="0" max="39"></div>
+        <div><label>Col</label><input type="number" id="goal-one-col" value="10" min="0" max="39"></div>
+      </div>
+      <label style="font-size:10px;color:#64748b;margin-top:5px;display:block">Robot 2</label>
+      <select id="robot-two-sel"><option value="">—</option></select>
+      <div class="row2">
+        <div><label>Row</label><input type="number" id="goal-two-row" value="20" min="0" max="39"></div>
+        <div><label>Col</label><input type="number" id="goal-two-col" value="20" min="0" max="39"></div>
+      </div>
+      <button id="btn-coord-traverse" style="width:100%;margin-top:5px">Start Traverse</button>
+    </div>
+
+    <!-- AprilTag role management -->
+    <div class="section">
+      <h2>AprilTag Roles</h2>
+      <p style="font-size:10px;color:#475569;margin-bottom:5px">
+        Obstacle tags block A* paths. Goal tags appear as diamonds on the canvas.
+        Positions are auto-filled when vision detects the tag.
+      </p>
+      <table id="tag-table">
+        <thead><tr>
+          <th>ID</th><th>Role</th><th>Pos</th><th></th>
+        </tr></thead>
+        <tbody id="tag-tbody"></tbody>
+      </table>
+      <div class="tag-add-row">
+        <div style="flex:1"><label style="font-size:10px;color:#64748b;margin-bottom:2px;display:block">Tag ID</label>
+          <input type="number" id="tag-id-input" min="0" placeholder="6" style="margin-bottom:0"></div>
+        <div style="flex:1"><label style="font-size:10px;color:#64748b;margin-bottom:2px;display:block">Role</label>
+          <select id="tag-role-input" style="margin-bottom:0">
+            <option value="obstacle">Obstacle</option>
+            <option value="goal">Goal</option>
+            <option value="none">Clear</option>
+          </select>
+        </div>
+        <button id="btn-add-tag" style="align-self:flex-end;flex-shrink:0;min-width:40px;padding:5px 8px">Add</button>
+      </div>
+    </div>
+
+  </div><!-- end left-panel -->
+
+  <!-- ───── Right area ───── -->
+  <div class="right-area">
+    <div class="arena-wrap">
+      <canvas id="arena-canvas"></canvas>
+    </div>
+    <div class="camera-strip">
+      <span class="cam-label">Vision Camera (AprilTag localization)</span>
+      <span class="cam-offline" id="cam-offline">Camera offline</span>
+      <img id="cam-img" alt="Vision camera" style="display:none">
+    </div>
+  </div>
+</div>
+
+<div id="status-bar">Waiting for robots…</div>
+
+<script type="module">
+import { init as arenaInit, render as arenaRender } from "/static/arena.js";
+import { init as ctrlInit, updateRobots, updateTagRegistry, setWaypointFromClick } from "/static/controls.js";
+import { onSnapshot } from "/static/ws_client.js";
+
+// ── Arena
+const canvas = document.getElementById("arena-canvas");
+arenaInit(canvas, setWaypointFromClick);
+
+// ── Controls
+ctrlInit({
+    robotSelect:      document.getElementById("robot-select"),
+    robotOneSel:      document.getElementById("robot-one-sel"),
+    robotTwoSel:      document.getElementById("robot-two-sel"),
+    goalOneRowEl:     document.getElementById("goal-one-row"),
+    goalOneColEl:     document.getElementById("goal-one-col"),
+    goalTwoRowEl:     document.getElementById("goal-two-row"),
+    goalTwoColEl:     document.getElementById("goal-two-col"),
+    waypointXEl:      document.getElementById("wp-x"),
+    waypointYEl:      document.getElementById("wp-y"),
+    statusEl:         document.getElementById("status-bar"),
+    tagTableBody:     document.getElementById("tag-tbody"),
+    btnPause:         document.getElementById("btn-pause"),
+    btnResume:        document.getElementById("btn-resume"),
+    btnStop:          document.getElementById("btn-stop"),
+    btnGripper:       document.getElementById("btn-gripper"),
+    btnStraight:      document.getElementById("btn-straight"),
+    btnTurnaround:    document.getElementById("btn-turnaround"),
+    btnLPath:         document.getElementById("btn-lpath"),
+    btnGoWaypoint:    document.getElementById("btn-go-waypoint"),
+    btnCoordTraverse: document.getElementById("btn-coord-traverse"),
+    btnAddTag:        document.getElementById("btn-add-tag"),
+});
+
+// ── Robot color palette (matches arena.js)
+const COLORS = [
+    "#1f77b4","#ff7f0e","#2ca02c","#d62728",
+    "#9467bd","#8c564b","#e377c2","#7f7f7f","#bcbd22","#17becf",
+];
+const _colorIdx = {};
+let   _nextColor = 0;
+function colorFor(id) {
+    if (!(id in _colorIdx)) _colorIdx[id] = COLORS[_nextColor++ % COLORS.length];
+    return _colorIdx[id];
+}
+
+const MAX_VEL = 400; // deg/s — clamp velocity bars
+
+// ── Snapshot handler
+onSnapshot((snapshot) => {
+    const { robots, obstacles, goals } = snapshot;
+    arenaRender(snapshot);
+    updateRobots(robots);
+    updateTagRegistry(obstacles, goals);
+    _refreshTable(robots);
+    _refreshCards(robots);
+});
+
+// ── Fleet status table
+function _refreshTable(robots) {
+    const tbody = document.getElementById("robot-tbody");
+    tbody.innerHTML = "";
+    for (const [id, s] of Object.entries(robots).sort()) {
+        const tr = document.createElement("tr");
+        const grip = s.gripper_open
+            ? `<span style="color:#6ee7b7">Open</span>`
+            : `<span style="color:#d8b4fe">Closed</span>`;
+        tr.innerHTML = `
+            <td style="color:${colorFor(id)};font-weight:700">${id}</td>
+            <td>${s.state ?? "—"}</td>
+            <td>${s.x_cm     != null ? (+s.x_cm).toFixed(1)     : "—"}</td>
+            <td>${s.y_cm     != null ? (+s.y_cm).toFixed(1)     : "—"}</td>
+            <td>${s.theta_deg != null ? (+s.theta_deg).toFixed(1) : "—"}°</td>
+            <td>${grip}</td>
+        `;
+        tbody.appendChild(tr);
+    }
+}
+
+// ── Per-robot telemetry detail cards
+function _refreshCards(robots) {
+    const container = document.getElementById("telemetry-cards");
+    const ids = Object.keys(robots).sort();
+
+    // Remove cards for disconnected robots
+    for (const el of Array.from(container.querySelectorAll(".robot-card"))) {
+        if (!ids.includes(el.dataset.robotId)) el.remove();
+    }
+
+    for (const id of ids) {
+        const s     = robots[id];
+        const color = colorFor(id);
+        let card = container.querySelector(`.robot-card[data-robot-id="${id}"]`);
+
+        if (!card) {
+            card = document.createElement("div");
+            card.className      = "robot-card";
+            card.dataset.robotId = id;
+            container.appendChild(card);
+        }
+
+        const gripClass = s.gripper_open ? "gripper-open" : "gripper-closed";
+        const gripText  = s.gripper_open ? "Grip: Open" : "Grip: Closed";
+
+        const lVel = s.left_motor_vel_deg_per_sec  ?? 0;
+        const rVel = s.right_motor_vel_deg_per_sec ?? 0;
+        const lPct = Math.min(100, Math.abs(lVel) / MAX_VEL * 100).toFixed(0);
+        const rPct = Math.min(100, Math.abs(rVel) / MAX_VEL * 100).toFixed(0);
+        const lSign = lVel < 0 ? "−" : "";
+        const rSign = rVel < 0 ? "−" : "";
+
+        const pathStr = s.path_id
+            ? `path ${s.path_id}${s.waypoint_index != null ? ` wp${s.waypoint_index}` : ""}`
+            : "idle";
+
+        const fusedStr = s.fused_x != null
+            ? `fused (${(+s.fused_x).toFixed(1)}, ${(+s.fused_y).toFixed(1)}, ${(+s.fused_theta).toFixed(1)}°)`
+            : "";
+
+        const pendingStr = s.pending_waypoint_count > 0
+            ? ` · ${s.pending_waypoint_count} queued`
+            : "";
+        const navStr = (s.nav_path_waypoints?.length ?? 0) > 0
+            ? ` · ${s.nav_path_waypoints.length} nav wpts`
+            : "";
+
+        card.innerHTML = `
+          <div class="card-header">
+            <span class="robot-dot" style="background:${color}"></span>
+            <span class="card-title" style="color:${color}">${id}</span>
+            <span class="state-badge">${s.state ?? "?"}</span>
+            <span class="gripper-badge ${gripClass}">${gripText}</span>
+          </div>
+
+          <div class="vel-row">
+            <span class="vel-label" style="color:#3b82f6">L</span>
+            <div class="vel-bar-track">
+              <div class="vel-bar-fill left" style="width:${lPct}%"></div>
+            </div>
+            <span class="vel-value">${lSign}${Math.abs(lVel).toFixed(0)} °/s</span>
+          </div>
+          <div class="vel-row">
+            <span class="vel-label" style="color:#10b981">R</span>
+            <div class="vel-bar-track">
+              <div class="vel-bar-fill right" style="width:${rPct}%"></div>
+            </div>
+            <span class="vel-value">${rSign}${Math.abs(rVel).toFixed(0)} °/s</span>
+          </div>
+
+          <div class="pose-row">
+            ${s.x_cm != null
+                ? `pos (${(+s.x_cm).toFixed(1)}, ${(+s.y_cm).toFixed(1)}) θ ${(+s.theta_deg).toFixed(1)}°`
+                : "no pose"
+            }
+            ${fusedStr ? `<br>${fusedStr}` : ""}
+            <br>${pathStr}${pendingStr}${navStr}
+          </div>
+        `;
+    }
+}
+
+// ── WebSocket status indicator
+let _lastSnap = 0;
+onSnapshot(() => { _lastSnap = Date.now(); });
+setInterval(() => {
+    const age = Date.now() - _lastSnap;
+    const el  = document.getElementById("ws-status");
+    if (age < 4000) { el.textContent = "Connected"; el.className = "connected"; }
+    else            { el.textContent = "Reconnecting…"; el.className = ""; }
+}, 1000);
+
+// ── Camera probe
+(async function probeCam() {
+    try {
+        const resp = await fetch("/camera", { signal: AbortSignal.timeout(3000) });
+        if (resp.ok) {
+            document.getElementById("cam-img").src = "/camera";
+            document.getElementById("cam-img").style.display = "block";
+            document.getElementById("cam-offline").style.display = "none";
+        } else { setTimeout(probeCam, 10000); }
+    } catch { setTimeout(probeCam, 10000); }
+})();
+</script>
+</body>
+</html>

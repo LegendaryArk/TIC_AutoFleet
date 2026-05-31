@@ -19,6 +19,8 @@ if _HEADLESS:
 else:
     from gui import TelemetryGUI
 
+from dashboard.server import DashboardServer
+
 HOST = "0.0.0.0"
 PORT = 9000
 MAX_CLIENTS = 10
@@ -46,6 +48,8 @@ class ClientSession:
     active_subpath_id: Optional[int] = None
     awaiting_path_ack: bool = False
     awaiting_path_complete: bool = False
+    gripper_open: bool = False
+    nav_path_waypoints: list[dict] = field(default_factory=list)
 
 
 clients_lock = threading.Lock()
@@ -55,6 +59,12 @@ client_sessions: Dict[int, ClientSession] = {}
 
 # keyed by robot_id
 robots_by_id: Dict[str, int] = {}
+
+# AprilTag role registry — keyed by tag_id (int)
+# Each entry: {tag_id, role, row, col, x_cm, y_cm}
+# Protected by clients_lock
+obstacle_tags: Dict[int, dict] = {}
+goal_tags: Dict[int, dict] = {}
 
 next_client_id = 1
 next_robot_path_id = 1000
@@ -91,23 +101,47 @@ def get_session(client_id: int) -> Optional[ClientSession]:
 
 def get_robot_snapshot() -> dict:
     with clients_lock:
-        snapshot = {}
+        robots = {}
         for robot_id, client_id in robots_by_id.items():
             session = client_sessions.get(client_id)
             if session is None:
                 continue
 
-            snapshot[robot_id] = {
+            telem = session.last_telemetry or {}
+            robots[robot_id] = {
                 "client_id": session.client_id,
                 "name": session.name,
                 "state": session.state,
                 "path_id": session.current_path_id,
                 "waypoint_index": session.current_waypoint_index,
                 "last_heartbeat": session.last_heartbeat,
-                "last_telemetry": session.last_telemetry,
+                "last_telemetry": telem,
                 "last_status": session.last_status,
+                # Flattened telemetry fields for easy canvas access
+                "x_cm": telem.get("x_cm"),
+                "y_cm": telem.get("y_cm"),
+                "theta_deg": telem.get("theta_deg"),
+                "front_ultrasonic_cm": telem.get("front_ultrasonic_cm"),
+                "left_ultrasonic_cm": telem.get("left_ultrasonic_cm"),
+                "left_motor_vel_deg_per_sec": telem.get("left_motor_vel_deg_per_sec"),
+                "right_motor_vel_deg_per_sec": telem.get("right_motor_vel_deg_per_sec"),
+                # Vision-fused pose (populated by apriltag-localization branch)
+                "fused_x": telem.get("fused_x"),
+                "fused_y": telem.get("fused_y"),
+                "fused_theta": telem.get("fused_theta"),
+                # Gripper state (toggled server-side; TODO: report from firmware)
+                "gripper_open": session.gripper_open,
+                # Planned A* path waypoints for canvas overlay
+                "nav_path_waypoints": list(session.nav_path_waypoints),
+                # Queued waypoints remaining (coordinated traverse)
+                "pending_waypoint_count": len(session.pending_waypoints),
             }
-        return snapshot
+
+        return {
+            "robots": robots,
+            "obstacles": list(obstacle_tags.values()),
+            "goals": list(goal_tags.values()),
+        }
 
 
 def print_robot_table() -> None:
@@ -442,19 +476,183 @@ def queue_robot_path(message: dict) -> bool:
     return True
 
 
+def navigate_to_goal(message: dict) -> bool:
+    """
+    Plan an A* path from the robot's current position to a goal and dispatch
+    the entire path as a single path_assignment (for pure-pursuit client).
+    """
+    robot_id = message.get("robot_id")
+    if not robot_id:
+        return False
+
+    goal_x = message.get("goal_x_cm")
+    goal_y = message.get("goal_y_cm")
+    if goal_x is None or goal_y is None:
+        print(f"[NAV] Missing goal_x_cm / goal_y_cm in navigate_to_goal")
+        return False
+
+    goal_cell = (
+        clamp_cell(int(float(goal_y) // GRID_CELL_CM)),
+        clamp_cell(int(float(goal_x) // GRID_CELL_CM)),
+    )
+
+    with clients_lock:
+        client_id = robots_by_id.get(robot_id)
+        if client_id is None:
+            print(f"[NAV] No session for robot_id={robot_id}")
+            return False
+
+        session = client_sessions.get(client_id)
+        if session is None:
+            return False
+
+        telem = session.last_telemetry or {}
+        start_cell = pose_to_cell(telem)
+        if start_cell is None:
+            print(f"[NAV] No telemetry position for {robot_id} — cannot plan path")
+            return False
+
+        # Blocked cells: other robots' current positions + tagged obstacles
+        blocked: set[tuple[int, int]] = set()
+        for s in client_sessions.values():
+            if s.robot_id and s.robot_id != robot_id and s.last_telemetry:
+                c = pose_to_cell(s.last_telemetry)
+                if c:
+                    blocked.add(c)
+        for obs in obstacle_tags.values():
+            if obs.get("row") is not None and obs.get("col") is not None:
+                blocked.add((obs["row"], obs["col"]))
+
+    path_cells = plan_grid_path(start_cell, goal_cell, blocked)
+    if path_cells is None:
+        print(f"[NAV] No A* path found for {robot_id}: {start_cell} → {goal_cell}")
+        return False
+
+    waypoints = [cell_center_waypoint(c) for c in path_cells[1:]]
+    if not waypoints:
+        print(f"[NAV] {robot_id} is already at the goal cell")
+        return True
+
+    path_id = next_subpath_id()
+    nav_msg = {
+        "type": "path_assignment",
+        "robot_id": robot_id,
+        "path_id": path_id,
+        "replace_existing": True,
+        "waypoints": waypoints,
+    }
+    if isinstance(message.get("motion"), dict):
+        nav_msg["motion"] = message["motion"]
+
+    # Store the full path for canvas overlay, then clear on path_complete
+    with clients_lock:
+        client_id = robots_by_id.get(robot_id)
+        session = client_sessions.get(client_id) if client_id is not None else None
+        if session is not None:
+            clear_robot_sequence(session)
+            session.nav_path_waypoints = list(waypoints)
+            session.current_path_id = str(path_id)
+            session.awaiting_path_complete = True
+
+    ok = send_to_robot(robot_id, nav_msg)
+    if ok:
+        print(f"[NAV] Dispatched A* path to {robot_id}: {len(waypoints)} waypoints "
+              f"({start_cell} → {goal_cell})")
+    return ok
+
+
+def set_tag_role(message: dict) -> bool:
+    """
+    Assign or clear an AprilTag's role (obstacle | goal | none).
+
+    message = {
+        "type": "set_tag_role",
+        "tag_id": <int>,
+        "role": "obstacle" | "goal" | "none",
+        "x_cm": <optional float>,
+        "y_cm": <optional float>,
+    }
+
+    When x_cm / y_cm are omitted the tag is registered without a known
+    position (position will be filled in when vision detects it).
+    """
+    try:
+        tag_id = int(message["tag_id"])
+    except (KeyError, TypeError, ValueError):
+        return False
+
+    role = str(message.get("role", "none"))
+    x_cm = message.get("x_cm")
+    y_cm = message.get("y_cm")
+
+    row: Optional[int] = None
+    col: Optional[int] = None
+    if x_cm is not None and y_cm is not None:
+        col = clamp_cell(int(float(x_cm) // GRID_CELL_CM))
+        row = clamp_cell(int(float(y_cm) // GRID_CELL_CM))
+
+    tag_info = {
+        "tag_id": tag_id,
+        "role": role,
+        "row": row,
+        "col": col,
+        "x_cm": float(x_cm) if x_cm is not None else None,
+        "y_cm": float(y_cm) if y_cm is not None else None,
+    }
+
+    with clients_lock:
+        obstacle_tags.pop(tag_id, None)
+        goal_tags.pop(tag_id, None)
+        if role == "obstacle":
+            obstacle_tags[tag_id] = tag_info
+        elif role == "goal":
+            goal_tags[tag_id] = tag_info
+
+    print(f"[TAG] tag_id={tag_id} → role={role!r}")
+    return True
+
+
+def handle_tag_detected(client_id: int, msg: dict) -> None:
+    """
+    TODO (apriltag-localization merge): handle tag_detected messages from
+    vision_localizer.py when it spots a non-robot, non-corner AprilTag.
+
+    Expected message format:
+        {
+            "type": "tag_detected",
+            "tag_id": <int>,
+            "x_cm": <float>,
+            "y_cm": <float>,
+            "theta_deg": <float>,
+        }
+
+    Implementation steps:
+    1. Look up tag_id in obstacle_tags / goal_tags.
+    2. If found, update the stored x_cm / y_cm / row / col with the
+       vision-measured position (smoothed over time if desired).
+    3. Broadcast the updated snapshot so the canvas re-renders obstacle
+       and goal markers at their detected positions.
+    4. Optionally: if a goal tag moves, notify any robot navigating to it.
+    """
+    # TODO: implement after merging apriltag-localization branch
+    robot_label = f"client_{client_id}"
+    print(f"[{robot_label}] tag_detected (unhandled): {msg}")
+
+
 # ----------------------------
 # GUI command callback
 # ----------------------------
 def gui_command_sender(message_obj):
     """
-    Called by GUI button handlers.
-    message_obj is one of your dataclass message objects from messages.py.
+    Called by GUI button handlers and the web dashboard POST /command endpoint.
+    message_obj is a dict or a dataclass message object from messages.py.
     """
     try:
         message = message_obj if isinstance(message_obj, dict) else message_obj.to_dict()
+        msg_type = message.get("type")
         robot_id = message.get("robot_id")
 
-        if message.get("type") == "coordinated_traverse":
+        if msg_type == "coordinated_traverse":
             ok = start_coordinated_traverse(message)
             if ok:
                 print("[GUI SEND] Started coordinated two-robot traverse")
@@ -462,26 +660,50 @@ def gui_command_sender(message_obj):
                 print("[GUI SEND] Failed to start coordinated two-robot traverse")
             return
 
+        if msg_type == "navigate_to_goal":
+            ok = navigate_to_goal(message)
+            if ok:
+                print(f"[GUI SEND] A* navigate dispatched for {robot_id}")
+            else:
+                print(f"[GUI SEND] A* navigate failed for {robot_id}")
+            return
+
+        if msg_type == "set_tag_role":
+            ok = set_tag_role(message)
+            if ok:
+                print(f"[GUI SEND] Tag role updated: tag_id={message.get('tag_id')} role={message.get('role')}")
+            else:
+                print("[GUI SEND] set_tag_role failed")
+            return
+
         if not robot_id:
             print("[GUI SEND] Refusing to send message with no robot_id")
             return
 
-        if message.get("type") == "path_assignment":
+        if msg_type == "path_assignment":
             ok = queue_robot_path(message)
         else:
-            if message.get("type") == "stop":
+            if msg_type == "stop":
                 with clients_lock:
                     client_id = robots_by_id.get(robot_id)
                     session = client_sessions.get(client_id) if client_id is not None else None
                     if session is not None:
                         clear_robot_sequence(session)
+                        session.nav_path_waypoints.clear()
+
+            if msg_type == "toggle_gripper":
+                with clients_lock:
+                    client_id = robots_by_id.get(robot_id)
+                    session = client_sessions.get(client_id) if client_id is not None else None
+                    if session is not None:
+                        session.gripper_open = not session.gripper_open
 
             ok = send_to_robot(robot_id, message)
 
         if ok:
-            print(f"[GUI SEND] Sent {message.get('type')} to {robot_id}")
+            print(f"[GUI SEND] Sent {msg_type} to {robot_id}")
         else:
-            print(f"[GUI SEND] Failed to send {message.get('type')} to {robot_id}")
+            print(f"[GUI SEND] Failed to send {msg_type} to {robot_id}")
 
     except Exception as exc:
         print(f"[GUI SEND] Error building/sending message: {exc}")
@@ -489,6 +711,13 @@ def gui_command_sender(message_obj):
 
 # Initialize GUI
 gui = TelemetryGUI(command_sender=gui_command_sender)
+
+# Initialize web dashboard (always starts, regardless of --no-gui)
+dashboard = DashboardServer(
+    snapshot_fn=get_robot_snapshot,
+    command_callback=gui_command_sender,
+)
+dashboard.start()
 
 
 # ----------------------------
@@ -561,6 +790,7 @@ def handle_telemetry(client_id: int, msg: dict) -> None:
 
     if session.robot_id:
         gui.update_robot(session.robot_id, msg)
+        dashboard.notify(session.robot_id, msg)
 
     robot_label = session.robot_id if session.robot_id else f"client_{client_id}"
     print(f"[{robot_label}] telemetry: {msg}")
@@ -580,6 +810,7 @@ def handle_status(client_id: int, msg: dict) -> None:
 
     if session.robot_id:
         gui.update_robot(session.robot_id, merged)
+        dashboard.notify(session.robot_id, merged)
 
     robot_label = session.robot_id if session.robot_id else f"client_{client_id}"
     print(f"[{robot_label}] status: {msg}")
@@ -611,11 +842,13 @@ def handle_path_event(client_id: int, msg: dict) -> None:
             session.current_path_id = None
             session.awaiting_path_complete = False
             session.active_subpath_id = None
+            session.nav_path_waypoints.clear()
 
         session.last_status = merged
 
     if session.robot_id:
         gui.update_robot(session.robot_id, merged)
+        dashboard.notify(session.robot_id, merged)
 
     robot_label = session.robot_id if session.robot_id else f"client_{client_id}"
     print(f"[{robot_label}] {msg.get('type')}: {msg}")
@@ -698,6 +931,10 @@ def handle_client(client_id: int, conn: socket.socket, addr) -> None:
 
             elif msg_type == "ack":
                 handle_ack(client_id, msg)
+
+            elif msg_type == "tag_detected":
+                # TODO: implement handle_tag_detected after merging apriltag-localization
+                handle_tag_detected(client_id, msg)
 
             else:
                 print(f"[Client {client_id}] unknown message type: {msg_type}")
