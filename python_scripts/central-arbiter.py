@@ -1,4 +1,5 @@
 import heapq
+import io
 import json
 import math
 from collections import defaultdict
@@ -709,6 +710,33 @@ def gui_command_sender(message_obj):
         print(f"[GUI SEND] Error building/sending message: {exc}")
 
 
+class _TeeWriter(io.TextIOBase):
+    """
+    Wraps sys.stdout so every print() in the arbiter is forwarded to the
+    dashboard log panel in addition to the normal terminal output.
+    """
+
+    def __init__(self, original: io.TextIOBase, log_fn) -> None:
+        self._orig   = original
+        self._log_fn = log_fn
+        self._buf    = ""
+        self._lock   = threading.Lock()
+
+    def write(self, s: str) -> int:
+        with self._lock:
+            self._orig.write(s)
+            self._orig.flush()
+            self._buf += s
+            while "\n" in self._buf:
+                line, self._buf = self._buf.split("\n", 1)
+                if line.strip():
+                    self._log_fn("arbiter", line)
+        return len(s)
+
+    def flush(self) -> None:
+        self._orig.flush()
+
+
 # Initialize GUI
 gui = TelemetryGUI(command_sender=gui_command_sender)
 
@@ -718,6 +746,9 @@ dashboard = DashboardServer(
     command_callback=gui_command_sender,
 )
 dashboard.start()
+
+# Intercept arbiter stdout → forward every print() to the dashboard log panel
+sys.stdout = _TeeWriter(sys.stdout, dashboard.log)
 
 
 # ----------------------------

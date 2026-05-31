@@ -1,6 +1,8 @@
 import asyncio
 import json
 import threading
+import time
+from collections import deque
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -13,6 +15,26 @@ from fastapi.staticfiles import StaticFiles
 _STATIC_DIR = Path(__file__).parent / "static"
 
 VISION_MJPEG_URL = "http://localhost:8081/stream"
+
+
+class LogBuffer:
+    """Thread-safe ring buffer of recent log entries (source + line + timestamp)."""
+
+    MAX = 2000
+
+    def __init__(self) -> None:
+        self._buf: deque[dict] = deque(maxlen=self.MAX)
+        self._lock = threading.Lock()
+
+    def append(self, source: str, line: str) -> dict:
+        entry = {"ts": time.time(), "source": source, "line": line}
+        with self._lock:
+            self._buf.append(entry)
+        return entry
+
+    def snapshot(self) -> list[dict]:
+        with self._lock:
+            return list(self._buf)
 
 
 class _WebSocketManager:
@@ -67,6 +89,8 @@ class DashboardServer:
 
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._ws_manager = _WebSocketManager()
+        self._log_buf = LogBuffer()
+        self._log_ws  = _WebSocketManager()
         self._app = self._build_app()
 
     # ------------------------------------------------------------------
@@ -77,6 +101,20 @@ class DashboardServer:
         """Start uvicorn in a background daemon thread."""
         t = threading.Thread(target=self._run, daemon=True, name="dashboard-server")
         t.start()
+
+    def log(self, source: str, line: str) -> None:
+        """
+        Thread-safe. Buffer the log entry and broadcast to all /ws/logs subscribers.
+        Safe to call before start() — entries accumulate in the buffer and are
+        sent to any browser that connects later.
+        """
+        entry = self._log_buf.append(source, line)
+        if self._loop is None or self._loop.is_closed():
+            return
+        payload = json.dumps({"type": "log_entry", **entry})
+        asyncio.run_coroutine_threadsafe(
+            self._log_ws.broadcast(payload), self._loop
+        )
 
     def notify(self, robot_id: str, msg: dict) -> None:
         """
@@ -184,5 +222,37 @@ class DashboardServer:
                     "multipart/x-mixed-replace; boundary=frame",
                 ),
             )
+
+        log_buf = self._log_buf
+        log_ws  = self._log_ws
+
+        @app.websocket("/ws/logs")
+        async def log_ws_endpoint(ws: WebSocket):
+            await log_ws.connect(ws)
+            # Replay the full buffer so the panel isn't blank on first load
+            for entry in log_buf.snapshot():
+                try:
+                    await ws.send_text(json.dumps({"type": "log_entry", **entry}))
+                except Exception:
+                    break
+            try:
+                while True:
+                    await ws.receive_text()
+            except WebSocketDisconnect:
+                pass
+            finally:
+                await log_ws.disconnect(ws)
+
+        @app.post("/log")
+        async def inject_log(body: dict):
+            """
+            External processes (e.g. launch.py) POST log lines here.
+            Body: {"source": "<name>", "line": "<text>"}
+            """
+            source = str(body.get("source", "?"))
+            line   = str(body.get("line",   ""))
+            if line:
+                self.log(source, line)
+            return {"ok": True}
 
         return app

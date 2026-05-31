@@ -251,6 +251,104 @@ button.primary:hover { background: #2563eb; color: #fff; }
   text-transform: uppercase; letter-spacing: 0.06em;
 }
 .cam-offline { color: #334155; font-size: 11px; }
+
+/* ───── Log panel ───── */
+.log-panel {
+  flex-shrink: 0;
+  background: #060b15;
+  border-top: 1px solid #1e3a5f;
+  display: flex;
+  flex-direction: column;
+  height: 220px;
+  min-height: 80px;
+  max-height: 50vh;
+  resize: vertical;
+  overflow: hidden;
+}
+.log-panel.collapsed { height: 28px; min-height: 28px; resize: none; }
+
+.log-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: #0a0f1e;
+  border-bottom: 1px solid #1e3a5f;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+.log-title {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #475569;
+  margin-right: 4px;
+}
+.log-ws-dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: #374151;
+  flex-shrink: 0;
+}
+.log-ws-dot.on { background: #059669; }
+#log-filters {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.log-filter-chip {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10px;
+  color: #94a3b8;
+  cursor: pointer;
+  user-select: none;
+}
+.log-filter-chip input { margin: 0; cursor: pointer; }
+#log-search {
+  width: 100px;
+  background: #0f172a;
+  border: 1px solid #1e3a5f;
+  color: #e2e8f0;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  margin-bottom: 0;
+}
+.log-header label {
+  font-size: 10px;
+  color: #64748b;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  cursor: pointer;
+}
+.log-header button {
+  flex: none;
+  min-width: unset;
+  padding: 2px 8px;
+  font-size: 10px;
+}
+.log-body {
+  flex: 1;
+  overflow-y: auto;
+  font-family: "Cascadia Code", "Fira Mono", "Consolas", monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  padding: 4px 8px;
+}
+.log-body::-webkit-scrollbar { width: 5px; }
+.log-body::-webkit-scrollbar-track { background: #060b15; }
+.log-body::-webkit-scrollbar-thumb { background: #1e3a5f; border-radius: 3px; }
+.log-line {
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.log-line .log-ts  { color: #334155; margin-right: 6px; }
+.log-line .log-src { font-weight: 700; margin-right: 6px; }
 </style>
 </head>
 <body>
@@ -378,6 +476,22 @@ button.primary:hover { background: #2563eb; color: #fff; }
       <img id="cam-img" alt="Vision camera" style="display:none">
     </div>
   </div>
+</div>
+
+<!-- ───── Log panel (full-width, collapsible) ───── -->
+<div class="log-panel" id="log-panel">
+  <div class="log-header">
+    <span class="log-title">Process Log</span>
+    <span class="log-ws-dot" id="log-ws-dot" title="Log WebSocket"></span>
+    <div id="log-filters"></div>
+    <input type="text" id="log-search" placeholder="Search…" title="Filter by text">
+    <label title="Auto-scroll to new lines">
+      <input type="checkbox" id="log-autoscroll" checked> Auto-scroll
+    </label>
+    <button id="log-clear" class="danger" style="margin-left:auto">Clear</button>
+    <button id="log-toggle">Hide</button>
+  </div>
+  <div class="log-body" id="log-body"></div>
 </div>
 
 <div id="status-bar">Waiting for robots…</div>
@@ -563,6 +677,165 @@ setInterval(() => {
             document.getElementById("cam-offline").style.display = "none";
         } else { setTimeout(probeCam, 10000); }
     } catch { setTimeout(probeCam, 10000); }
+})();
+
+// ── Log panel ─────────────────────────────────────────────────────────────
+
+(function initLogPanel() {
+    const LOG_MAX_DOM   = 500;   // max lines kept in the DOM
+    const RECONNECT_MS  = 2500;
+
+    // Source → colour (reuses the same colorFor() already defined above)
+    // "arbiter" gets white so it's visually distinct from robot sources
+    function logColorFor(source) {
+        if (source === "arbiter") return "#e2e8f0";
+        return colorFor(source);
+    }
+
+    const body        = document.getElementById("log-body");
+    const filterDiv   = document.getElementById("log-filters");
+    const searchEl    = document.getElementById("log-search");
+    const autoScrollEl = document.getElementById("log-autoscroll");
+    const clearBtn    = document.getElementById("log-clear");
+    const toggleBtn   = document.getElementById("log-toggle");
+    const panel       = document.getElementById("log-panel");
+    const wsDot       = document.getElementById("log-ws-dot");
+
+    let _collapsed    = false;
+    const _filters    = {};   // source → {enabled: bool, el: checkbox}
+    let   _searchText = "";
+    let   _lineCount  = 0;
+
+    // Format timestamp as HH:MM:SS.mmm
+    function _fmtTs(ts) {
+        const d   = new Date(ts * 1000);
+        const hh  = String(d.getHours()).padStart(2, "0");
+        const mm  = String(d.getMinutes()).padStart(2, "0");
+        const ss  = String(d.getSeconds()).padStart(2, "0");
+        const ms  = String(d.getMilliseconds()).padStart(3, "0");
+        return `${hh}:${mm}:${ss}.${ms}`;
+    }
+
+    // Ensure a source filter chip exists; return whether source is enabled
+    function _ensureFilter(source) {
+        if (source in _filters) return _filters[source].enabled;
+        const color = logColorFor(source);
+        const label = document.createElement("label");
+        label.className = "log-filter-chip";
+        const cb = document.createElement("input");
+        cb.type    = "checkbox";
+        cb.checked = true;
+        cb.addEventListener("change", () => {
+            _filters[source].enabled = cb.checked;
+            _applyFilters();
+        });
+        label.appendChild(cb);
+        const nameEl = document.createElement("span");
+        nameEl.textContent = source;
+        nameEl.style.color = color;
+        label.appendChild(nameEl);
+        filterDiv.appendChild(label);
+        _filters[source] = { enabled: true, el: cb };
+        return true;
+    }
+
+    function _applyFilters() {
+        for (const el of body.querySelectorAll(".log-line")) {
+            const src    = el.dataset.source;
+            const txt    = el.dataset.text;
+            const show   = (_filters[src]?.enabled ?? true)
+                        && (!_searchText || txt.includes(_searchText));
+            el.style.display = show ? "" : "none";
+        }
+    }
+
+    function _addLine(entry) {
+        const { ts, source, line } = entry;
+        const enabled = _ensureFilter(source);
+        const color   = logColorFor(source);
+
+        const div = document.createElement("div");
+        div.className      = "log-line";
+        div.dataset.source = source;
+        div.dataset.text   = (source + " " + line).toLowerCase();
+
+        div.innerHTML =
+            `<span class="log-ts">${_fmtTs(ts)}</span>` +
+            `<span class="log-src" style="color:${color}">[${source}]</span>` +
+            _escapeHtml(line);
+
+        // Apply current filters before inserting
+        const show = enabled && (!_searchText || div.dataset.text.includes(_searchText));
+        if (!show) div.style.display = "none";
+
+        body.appendChild(div);
+        _lineCount++;
+
+        // Prune oldest lines
+        while (_lineCount > LOG_MAX_DOM) {
+            body.removeChild(body.firstChild);
+            _lineCount--;
+        }
+
+        // Auto-scroll
+        if (autoScrollEl.checked) {
+            body.scrollTop = body.scrollHeight;
+        }
+    }
+
+    function _escapeHtml(s) {
+        return s.replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;");
+    }
+
+    // Controls
+    clearBtn.addEventListener("click", () => {
+        body.innerHTML = "";
+        _lineCount = 0;
+    });
+
+    toggleBtn.addEventListener("click", () => {
+        _collapsed = !_collapsed;
+        panel.classList.toggle("collapsed", _collapsed);
+        toggleBtn.textContent = _collapsed ? "Show" : "Hide";
+    });
+
+    // Pause auto-scroll when user manually scrolls up
+    body.addEventListener("scroll", () => {
+        const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 8;
+        if (!atBottom) autoScrollEl.checked = false;
+    });
+
+    searchEl.addEventListener("input", () => {
+        _searchText = searchEl.value.toLowerCase();
+        _applyFilters();
+    });
+
+    // WebSocket connection to /ws/logs
+    function _connectLogWs() {
+        const ws = new WebSocket(`ws://${location.host}/ws/logs`);
+
+        ws.addEventListener("open", () => {
+            wsDot.classList.add("on");
+        });
+
+        ws.addEventListener("message", (ev) => {
+            try {
+                const msg = JSON.parse(ev.data);
+                if (msg.type === "log_entry") _addLine(msg);
+            } catch { /* ignore malformed */ }
+        });
+
+        ws.addEventListener("close", () => {
+            wsDot.classList.remove("on");
+            setTimeout(_connectLogWs, RECONNECT_MS);
+        });
+
+        ws.addEventListener("error", () => ws.close());
+    }
+
+    _connectLogWs();
 })();
 </script>
 </body>

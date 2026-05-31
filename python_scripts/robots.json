@@ -1,0 +1,16 @@
+{
+  "robots": [
+    {
+      "robot_id": "robot_A",
+      "transport": "serial",
+      "serial_port": "/dev/ttyUSB0",
+      "serial_baud": 115200
+    },
+    {
+      "robot_id": "robot_B",
+      "transport": "serial",
+      "serial_port": "/dev/ttyUSB1",
+      "serial_baud": 115200
+    }
+  ]
+}
