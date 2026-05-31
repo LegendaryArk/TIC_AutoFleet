@@ -1,0 +1,6 @@
+# On Raspberry Pi, replace opencv-python with opencv-python-headless if you hit
+# build errors, but note that headless builds lack cv2.imshow — run with a
+# connected display or over VNC so the debug window works.
+numpy
+opencv-python
+pupil-apriltags

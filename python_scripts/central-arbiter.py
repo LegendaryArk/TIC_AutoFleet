@@ -636,6 +636,40 @@ def handle_ack(client_id: int, msg: dict) -> None:
     print(f"[{robot_label}] ack: {msg}")
 
 
+def handle_vision_telemetry(client_id: int, msg: dict) -> None:
+    """Update a robot's pose from the vision system without disrupting its session."""
+    touch_session(client_id)
+    target_id = msg.get("robot_id")
+    if not target_id:
+        return
+
+    x_cm = msg.get("x_cm")
+    y_cm = msg.get("y_cm")
+    theta_deg = msg.get("theta_deg")
+    merged = None
+    target_session = None
+
+    with clients_lock:
+        cid = robots_by_id.get(target_id)
+        target_session = client_sessions.get(cid) if cid is not None else None
+        if target_session is not None:
+            existing = dict(target_session.last_telemetry or {})
+            if x_cm is not None:
+                existing["x_cm"] = float(x_cm)
+            if y_cm is not None:
+                existing["y_cm"] = float(y_cm)
+            if theta_deg is not None:
+                existing["theta_deg"] = float(theta_deg)
+            existing["t_ms"] = int(time.time() * 1000)
+            target_session.last_telemetry = existing
+            merged = existing
+
+    if merged is not None and target_session is not None and target_session.robot_id:
+        gui.update_robot(target_session.robot_id, merged)
+
+    print(f"[VISION] {target_id}: x={x_cm} y={y_cm} theta={theta_deg}")
+
+
 def handle_heartbeat(client_id: int, conn: socket.socket, msg: dict) -> None:
     touch_session(client_id)
     bind_identity_from_message(client_id, msg)
@@ -687,6 +721,9 @@ def handle_client(client_id: int, conn: socket.socket, addr) -> None:
 
             elif msg_type == "ack":
                 handle_ack(client_id, msg)
+
+            elif msg_type == "vision_telemetry":
+                handle_vision_telemetry(client_id, msg)
 
             else:
                 print(f"[Client {client_id}] unknown message type: {msg_type}")
