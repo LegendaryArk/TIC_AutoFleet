@@ -37,6 +37,13 @@ class ClientSession:
     active_subpath_id: Optional[int] = None
     awaiting_path_ack: bool = False
     awaiting_path_complete: bool = False
+    fused_x: Optional[float] = None
+    fused_y: Optional[float] = None
+    fused_theta: Optional[float] = None
+    last_odom_x: Optional[float] = None
+    last_odom_y: Optional[float] = None
+    last_odom_theta: Optional[float] = None
+    vision_last_correction_t: float = 0.0
 
 
 clients_lock = threading.Lock()
@@ -149,6 +156,10 @@ def next_subpath_id() -> int:
     if next_robot_path_id > 30000:
         next_robot_path_id = 1000
     return next_robot_path_id
+
+
+def _normalize_angle(deg: float) -> float:
+    return (deg + 180.0) % 360.0 - 180.0
 
 
 def clear_robot_sequence(session: ClientSession) -> None:
@@ -546,13 +557,32 @@ def handle_telemetry(client_id: int, msg: dict) -> None:
 
     with clients_lock:
         session = client_sessions[client_id]
-        session.last_telemetry = msg
+
+        raw_x     = float(msg.get("x_cm",      0.0))
+        raw_y     = float(msg.get("y_cm",      0.0))
+        raw_theta = float(msg.get("theta_deg", 0.0))
+
+        if session.fused_x is not None and session.last_odom_x is not None:
+            session.fused_x    += raw_x - session.last_odom_x
+            session.fused_y    += raw_y - session.last_odom_y
+            session.fused_theta = _normalize_angle(
+                session.fused_theta + _normalize_angle(raw_theta - session.last_odom_theta))
+        else:
+            session.fused_x, session.fused_y, session.fused_theta = raw_x, raw_y, raw_theta
+
+        session.last_odom_x, session.last_odom_y, session.last_odom_theta = raw_x, raw_y, raw_theta
+
+        fused_msg = dict(msg)
+        fused_msg["x_cm"]      = session.fused_x
+        fused_msg["y_cm"]      = session.fused_y
+        fused_msg["theta_deg"] = session.fused_theta
+        session.last_telemetry = fused_msg
 
     if session.robot_id:
-        gui.update_robot(session.robot_id, msg)
+        gui.update_robot(session.robot_id, fused_msg)
 
     robot_label = session.robot_id if session.robot_id else f"client_{client_id}"
-    print(f"[{robot_label}] telemetry: {msg}")
+    print(f"[{robot_label}] telemetry: {fused_msg}")
 
 
 def handle_status(client_id: int, msg: dict) -> None:
@@ -653,16 +683,18 @@ def handle_vision_telemetry(client_id: int, msg: dict) -> None:
         cid = robots_by_id.get(target_id)
         target_session = client_sessions.get(cid) if cid is not None else None
         if target_session is not None:
-            existing = dict(target_session.last_telemetry or {})
-            if x_cm is not None:
-                existing["x_cm"] = float(x_cm)
-            if y_cm is not None:
-                existing["y_cm"] = float(y_cm)
-            if theta_deg is not None:
-                existing["theta_deg"] = float(theta_deg)
-            existing["t_ms"] = int(time.time() * 1000)
-            target_session.last_telemetry = existing
-            merged = existing
+            target_session.fused_x     = float(x_cm)
+            target_session.fused_y     = float(y_cm)
+            target_session.fused_theta = float(theta_deg)
+            target_session.vision_last_correction_t = time.time()
+
+            fused_msg = dict(target_session.last_telemetry or {})
+            fused_msg["x_cm"]      = float(x_cm)
+            fused_msg["y_cm"]      = float(y_cm)
+            fused_msg["theta_deg"] = float(theta_deg)
+            fused_msg["t_ms"]      = int(time.time() * 1000)
+            target_session.last_telemetry = fused_msg
+            merged = fused_msg
 
     if merged is not None and target_session is not None and target_session.robot_id:
         gui.update_robot(target_session.robot_id, merged)

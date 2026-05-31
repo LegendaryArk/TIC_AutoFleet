@@ -51,8 +51,14 @@ CAM_PARAMS = [1598.0, 1598.0, 960.0, 540.0]
 FRAME_WIDTH  = 1920
 FRAME_HEIGHT = 1080
 
-# How often (seconds) to push a vision_telemetry message per robot.
-SEND_INTERVAL_S = 0.1     # 10 Hz
+# How often (seconds) to push a vision_telemetry correction per robot.
+# Detection still runs every frame for the debug display.
+VISION_CORRECTION_INTERVAL_S = 3.0
+
+# Corner EMA smoothing — filters vibration jitter.
+# 0.1 = heavy smoothing (slow to adapt), 0.5 = light smoothing (fast to adapt).
+CORNER_SMOOTH_ALPHA = 0.2
+CORNER_MAX_AGE_S    = 5.0   # drop a smoothed corner if unseen for this long
 
 # Corner tag IDs → field position (x_cm, y_cm).
 # Origin is bottom-left of the field.
@@ -85,22 +91,20 @@ ARROW_LEN_PX = 30
 # Homography helpers
 # ---------------------------------------------------------------------------
 
-def compute_homography(detections) -> np.ndarray | None:
-    """Return H (image → field cm) if all 4 corner tags are visible."""
+def compute_homography_smooth(corner_smooth: dict) -> np.ndarray | None:
+    """Compute H (image → field cm) from EMA-smoothed corner positions."""
     src, dst = [], []
-    for det in detections:
-        if det.tag_id in CORNER_TAG_POSITIONS:
-            cx, cy = det.center
-            fx, fy = CORNER_TAG_POSITIONS[det.tag_id]
-            src.append([cx, cy])
-            dst.append([fx, fy])
-
+    for tag_id, entry in corner_smooth.items():
+        if tag_id in CORNER_TAG_POSITIONS:
+            src.append(entry["pos"])
+            dst.append(list(CORNER_TAG_POSITIONS[tag_id]))
     if len(src) < 4:
         return None
-
-    src_arr = np.array(src, dtype=np.float32)
-    dst_arr = np.array(dst, dtype=np.float32)
-    H, _ = cv2.findHomography(src_arr, dst_arr, cv2.RANSAC)
+    H, _ = cv2.findHomography(
+        np.array(src, dtype=np.float32),
+        np.array(dst, dtype=np.float32),
+        cv2.RANSAC,
+    )
     return H
 
 
@@ -219,10 +223,15 @@ def _field_to_map_px(x_cm: float, y_cm: float) -> tuple[int, int]:
     return px, py
 
 
-def build_field_map(robot_poses: dict[str, tuple[float, float, float]], H_valid: bool) -> np.ndarray:
+def build_field_map(
+    robot_poses: dict[str, tuple[float, float, float]],
+    H_valid: bool,
+    last_fix_t: dict[str, float] | None = None,
+) -> np.ndarray:
     """
     Build a 600×600 px top-down field map showing robot positions.
     robot_poses: {robot_id: (x_cm, y_cm, theta_deg)}
+    last_fix_t:  {robot_id: monotonic time of last sent correction}
     """
     img = np.full((FIELD_MAP_PX, FIELD_MAP_PX, 3), 30, dtype=np.uint8)
 
@@ -262,9 +271,15 @@ def build_field_map(robot_poses: dict[str, tuple[float, float, float]], H_valid:
         ey = int(py - ARROW_LEN_PX * math.sin(theta_rad))  # flip Y for display
         cv2.arrowedLine(img, (px, py), (ex, ey), color, 2, tipLength=0.3)
 
-        label = f"{robot_id} ({x_cm:.0f},{y_cm:.0f}) {theta_deg:.0f}°"
+        label = f"{robot_id} ({x_cm:.0f},{y_cm:.0f}) {theta_deg:.0f}deg"
         cv2.putText(img, label, (px + 12, py + 4),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+
+        if last_fix_t is not None and robot_id in last_fix_t:
+            elapsed = time.monotonic() - last_fix_t[robot_id]
+            fix_label = f"fix: {elapsed:.0f}s ago"
+            cv2.putText(img, fix_label, (px + 12, py + 18),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1)
 
     return img
 
@@ -274,6 +289,7 @@ def draw_debug_frame(
     detections,
     H: np.ndarray | None,
     robot_poses: dict[str, tuple[float, float, float]],
+    corner_smooth: dict | None = None,
 ) -> np.ndarray:
     """Return an annotated copy of frame."""
     out = frame.copy()
@@ -322,8 +338,15 @@ def draw_debug_frame(
             tx, ty = int(tip_img[0, 0, 0]), int(tip_img[0, 0, 1])
             cv2.arrowedLine(out, (cx, cy), (tx, ty), color, 2, tipLength=0.3)
 
-    # Field boundary reprojection (blue quad showing where homography puts the corners)
-    if H is not None:
+    # Field boundary — draw using smoothed corner positions directly when available
+    # (avoids H_inv numerical noise; falls back to H_inv reprojection otherwise)
+    if corner_smooth and len(corner_smooth) == 4:
+        ordered_ids = [0, 1, 2, 3]
+        if all(tid in corner_smooth for tid in ordered_ids):
+            pts = np.array([[corner_smooth[tid]["pos"].astype(int)]
+                            for tid in ordered_ids], dtype=np.int32)
+            cv2.polylines(out, [pts], True, FIELD_BORDER_COLOR, 2)
+    elif H is not None:
         H_inv = np.linalg.inv(H)
         field_corners_cm = np.array([
             [[0.0, 0.0]],
@@ -332,8 +355,7 @@ def draw_debug_frame(
             [[0.0, FIELD_SIZE_CM]],
         ], dtype=np.float32)
         img_corners = cv2.perspectiveTransform(field_corners_cm, H_inv)
-        img_corners_int = img_corners.astype(int)
-        cv2.polylines(out, [img_corners_int], True, FIELD_BORDER_COLOR, 2)
+        cv2.polylines(out, [img_corners.astype(int)], True, FIELD_BORDER_COLOR, 2)
 
     return out
 
@@ -378,6 +400,8 @@ def main() -> None:
     force_recalibrate = False
     robot_poses: dict[str, tuple[float, float, float]] = {}
     last_send_t: dict[str, float] = {}
+    # EMA-smoothed corner positions: {tag_id: {"pos": np.ndarray, "last_seen": float}}
+    corner_smooth: dict[int, dict] = {}
 
     print("[VISION] Running. Press 'q' to quit, 'r' to recalibrate.")
 
@@ -402,15 +426,34 @@ def main() -> None:
             tag_size=TAG_SIZE_M,
         )
 
-        # Recompute homography whenever all 4 corners are visible or forced
-        detected_corner_ids = {d.tag_id for d in detections if d.tag_id in CORNER_TAG_POSITIONS}
-        if force_recalibrate or (len(detected_corner_ids) == 4):
-            new_H = compute_homography(detections)
+        # Update per-corner EMA positions and recompute H every frame
+        now_t = time.monotonic()
+
+        if force_recalibrate:
+            corner_smooth.clear()
+            force_recalibrate = False
+            print("[VISION] Corner positions cleared — rebuilding.")
+
+        for det in detections:
+            if det.tag_id in CORNER_TAG_POSITIONS:
+                raw = np.array(det.center, dtype=np.float64)
+                if det.tag_id in corner_smooth:
+                    corner_smooth[det.tag_id]["pos"] = (
+                        CORNER_SMOOTH_ALPHA * raw
+                        + (1.0 - CORNER_SMOOTH_ALPHA) * corner_smooth[det.tag_id]["pos"]
+                    )
+                else:
+                    corner_smooth[det.tag_id]["pos"] = raw.copy()
+                corner_smooth[det.tag_id]["last_seen"] = now_t
+
+        # Expire stale corners
+        corner_smooth = {k: v for k, v in corner_smooth.items()
+                         if now_t - v["last_seen"] < CORNER_MAX_AGE_S}
+
+        if len(corner_smooth) >= 4:
+            new_H = compute_homography_smooth(corner_smooth)
             if new_H is not None:
                 H = new_H
-                if force_recalibrate:
-                    print("[VISION] Homography recalibrated.")
-                force_recalibrate = False
 
         # Localise visible robot tags
         if H is not None:
@@ -431,7 +474,7 @@ def main() -> None:
 
                     # Rate-limited send
                     now = time.monotonic()
-                    if sender and (now - last_send_t.get(robot_id, 0.0) >= SEND_INTERVAL_S):
+                    if sender and (now - last_send_t.get(robot_id, 0.0) >= VISION_CORRECTION_INTERVAL_S):
                         sender.send({
                             "type": "vision_telemetry",
                             "robot_id": robot_id,
@@ -444,12 +487,12 @@ def main() -> None:
 
         # Build display
         try:
-            annotated = draw_debug_frame(frame, detections, H, robot_poses)
+            annotated = draw_debug_frame(frame, detections, H, robot_poses, corner_smooth)
         except Exception as exc:
             print(f"[VISION] draw_debug_frame error: {exc}")
             annotated = frame.copy()
 
-        field_map = build_field_map(robot_poses, H is not None)
+        field_map = build_field_map(robot_poses, H is not None, last_send_t)
 
         # Scale both panels to 720px tall, then place side by side
         h_target = 720
